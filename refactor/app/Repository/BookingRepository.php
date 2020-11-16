@@ -26,6 +26,7 @@ use Monolog\Handler\StreamHandler;
 use Illuminate\Support\Facades\Log;
 use Monolog\Handler\FirePHPHandler;
 use Illuminate\Support\Facades\Auth;
+use DTApi\Models\Distance;
 
 /**
  * Class BookingRepository
@@ -61,6 +62,8 @@ class BookingRepository extends BaseRepository
         $usertype = '';
         $emergencyJobs = array();
         $noramlJobs = array();
+        $jobs = [];
+
         if ($cuser && $cuser->is('customer')) {
             $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback')->whereIn('status', ['pending', 'assigned', 'started'])->orderBy('due', 'asc')->get();
             $usertype = 'customer';
@@ -69,7 +72,8 @@ class BookingRepository extends BaseRepository
             $jobs = $jobs->pluck('jobs')->all();
             $usertype = 'translator';
         }
-        if ($jobs) {
+        
+        if (!empty($jobs)) {
             foreach ($jobs as $jobitem) {
                 if ($jobitem->immediate == 'yes') {
                     $emergencyJobs[] = $jobitem;
@@ -82,7 +86,7 @@ class BookingRepository extends BaseRepository
             })->sortBy('due')->all();
         }
 
-        return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'cuser' => $cuser, 'usertype' => $usertype];
+        return compact('emergencyJobs', 'noramlJobs', 'cuser', 'usertype');;
     }
 
     /**
@@ -91,20 +95,17 @@ class BookingRepository extends BaseRepository
      */
     public function getUsersJobsHistory($user_id, Request $request)
     {
-        $page = $request->get('page');
-        if (isset($page)) {
-            $pagenum = $page;
-        } else {
-            $pagenum = "1";
-        }
+        $pagenum = (isset($request->get('page')) || $request->get('page') ) ? $request->get('page') : '1' ;
         $cuser = User::find($user_id);
         $usertype = '';
         $emergencyJobs = array();
         $noramlJobs = array();
+        $numpages = 0;
+
         if ($cuser && $cuser->is('customer')) {
             $jobs = $cuser->jobs()->with('user.userMeta', 'user.average', 'translatorJobRel.user.average', 'language', 'feedback', 'distance')->whereIn('status', ['completed', 'withdrawbefore24', 'withdrawafter24', 'timedout'])->orderBy('due', 'desc')->paginate(15);
             $usertype = 'customer';
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => [], 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => 0, 'pagenum' => 0];
+            $pagenum = 0
         } elseif ($cuser && $cuser->is('translator')) {
             $jobs_ids = Job::getTranslatorJobsHistoric($cuser->id, 'historic', $pagenum);
             $totaljobs = $jobs_ids->total();
@@ -114,10 +115,9 @@ class BookingRepository extends BaseRepository
 
             $jobs = $jobs_ids;
             $noramlJobs = $jobs_ids;
-//            $jobs['data'] = $noramlJobs;
-//            $jobs['total'] = $totaljobs;
-            return ['emergencyJobs' => $emergencyJobs, 'noramlJobs' => $noramlJobs, 'jobs' => $jobs, 'cuser' => $cuser, 'usertype' => $usertype, 'numpages' => $numpages, 'pagenum' => $pagenum];
         }
+
+        return compact('emergencyJobs', 'noramlJobs', 'jobs', 'cuser', 'usertype', 'numpages', 'pagenum');
     }
 
     /**
@@ -177,7 +177,7 @@ class BookingRepository extends BaseRepository
             } else {
                 $data['customer_phone_type'] = 'no';
             }
-
+            $data['customer_phone_type'] = isset($data['customer_phone_type']) ? "yes" : "no";
             if (isset($data['customer_physical_type'])) {
                 $data['customer_physical_type'] = 'yes';
                 $response['customer_physical_type'] = 'yes';
@@ -285,7 +285,7 @@ class BookingRepository extends BaseRepository
      */
     public function storeJobEmail($data)
     {
-        $user_type = $data['user_type'];
+        $user_type = @$data['user_type'];
         $job = Job::findOrFail(@$data['user_email_job_id']);
         $job->user_email = @$data['user_email'];
         $job->reference = isset($data['reference']) ? $data['reference'] : '';
@@ -382,7 +382,7 @@ class BookingRepository extends BaseRepository
     public function jobEnd($post_data = array())
     {
         $completeddate = date('Y-m-d H:i:s');
-        $jobid = $post_data["job_id"];
+        $jobid = @$post_data["job_id"];
         $job_detail = Job::with('translatorJobRel')->find($jobid);
         $duedate = $job_detail->due;
         $start = date_create($duedate);
@@ -415,9 +415,9 @@ class BookingRepository extends BaseRepository
 
         $job->save();
 
-        $tr = $job->translatorJobRel->where('completed_at', Null)->where('cancel_at', Null)->first();
+        $tr = $job->translatorJobRel->whereNull('completed_at')->whereNull('cancel_at')->first();
 
-        Event::fire(new SessionEnded($job, ($post_data['userid'] == $job->user_id) ? $tr->user_id : $job->user_id));
+        Event::fire(new SessionEnded($job, (@$post_data['userid'] == $job->user_id) ? $tr->user_id : $job->user_id));
 
         $user = $tr->user()->first();
         $email = $user->email;
@@ -433,7 +433,7 @@ class BookingRepository extends BaseRepository
         $mailer->send($email, $name, $subject, 'emails.session-ended', $data);
 
         $tr->completed_at = $completeddate;
-        $tr->completed_by = $post_data['userid'];
+        $tr->completed_by = @$post_data['userid'];
         $tr->save();
     }
 
@@ -742,9 +742,9 @@ class BookingRepository extends BaseRepository
     {
         $job = Job::find($id);
 
-        $current_translator = $job->translatorJobRel->where('cancel_at', Null)->first();
+        $current_translator = $job->translatorJobRel->whereNull('cancel_at')->first();
         if (is_null($current_translator))
-            $current_translator = $job->translatorJobRel->where('completed_at', '!=', Null)->first();
+            $current_translator = $job->translatorJobRel->whereNotNull('completed_at')->first();
 
         $log_data = [];
 
@@ -832,7 +832,7 @@ class BookingRepository extends BaseRepository
                     'new_status' => $data['status']
                 ];
                 $statusChanged = true;
-                return ['statusChanged' => $statusChanged, 'log_data' => $log_data];
+                return compact('statusChanged', 'log_data');
             }
         }
     }
@@ -937,7 +937,7 @@ class BookingRepository extends BaseRepository
             $subject = 'Information om avslutad tolkning för bokningsnummer #' . $job->id;
             $this->mailer->send($email, $name, $subject, 'emails.session-ended', $dataEmail);
 
-            $user = $job->translatorJobRel->where('completed_at', Null)->where('cancel_at', Null)->first();
+            $user = $job->translatorJobRel->whereNull('completed_at')->whereNull('cancel_at')->first();
 
             $email = $user->user->email;
             $name = $user->user->name;
@@ -1083,7 +1083,7 @@ class BookingRepository extends BaseRepository
                 $subject = 'Information om avslutad tolkning för bokningsnummer #' . $job->id;
                 $this->mailer->send($email, $name, $subject, 'emails.status-changed-from-pending-or-assigned-customer', $dataEmail);
 
-                $user = $job->translatorJobRel->where('completed_at', Null)->where('cancel_at', Null)->first();
+                $user = $job->translatorJobRel->whereNull('completed_at')->whereNull('cancel_at')->first();
 
                 $email = $user->user->email;
                 $name = $user->user->name;
@@ -1135,11 +1135,11 @@ class BookingRepository extends BaseRepository
                 $translatorChanged = true;
             }
             if ($translatorChanged)
-                return ['translatorChanged' => $translatorChanged, 'new_translator' => $new_translator, 'log_data' => $log_data];
+                return compact("translatorChanged", "new_translator", "log_data");
 
         }
 
-        return ['translatorChanged' => $translatorChanged];
+        return compact("translatorChanged");
     }
 
     /**
@@ -1156,10 +1156,10 @@ class BookingRepository extends BaseRepository
                 'new_due' => $new_due
             ];
             $dateChanged = true;
-            return ['dateChanged' => $dateChanged, 'log_data' => $log_data];
+            return compact("dateChanged", "log_data");
         }
 
-        return ['dateChanged' => $dateChanged];
+        return compact("dateChanged");
 
     }
 
@@ -1632,7 +1632,7 @@ class BookingRepository extends BaseRepository
 
         $job->save();
 
-        $tr = $job->translatorJobRel()->where('completed_at', Null)->where('cancel_at', Null)->first();
+        $tr = $job->translatorJobRel()->whereNull('completed_at')->whereNull('cancel_at')->first();
 
         Event::fire(new SessionEnded($job, ($post_data['user_id'] == $job->user_id) ? $tr->user_id : $job->user_id));
 
@@ -1671,7 +1671,7 @@ class BookingRepository extends BaseRepository
         $job->end_at = date('Y-m-d H:i:s');
         $job->status = 'not_carried_out_customer';
 
-        $tr = $job->translatorJobRel()->where('completed_at', Null)->where('cancel_at', Null)->first();
+        $tr = $job->translatorJobRel()->whereNull('completed_at')->whereNull('cancel_at')->first();
         $tr->completed_at = $completeddate;
         $tr->completed_by = $tr->user_id;
         $job->save();
@@ -2112,11 +2112,10 @@ class BookingRepository extends BaseRepository
 
     public function reopen($request)
     {
-        $jobid = $request['jobid'];
-        $userid = $request['userid'];
+        $jobid = @$request['jobid'];
+        $userid = @$request['userid'];
 
-        $job = Job::find($jobid);
-        $job = $job->toArray();
+        $job = Job::find($jobid)->toArray();
 
         $data = array();
         $data['created_at'] = date('Y-m-d H:i:s');
@@ -2151,7 +2150,7 @@ class BookingRepository extends BaseRepository
             $new_jobid = $affectedRows['id'];
         }
         //$result = DB::table('translator_job_rel')->insertGetId($data);
-        Translator::where('job_id', $jobid)->where('cancel_at', NULL)->update(['cancel_at' => $data['cancel_at']]);
+        Translator::where('job_id', $jobid)->whereNull('cancel_at')->update(['cancel_at' => $data['cancel_at']]);
         $Translator = Translator::create($data);
         if (isset($affectedRows)) {
             $this->sendNotificationByAdminCancelJob($new_jobid);
@@ -2159,6 +2158,66 @@ class BookingRepository extends BaseRepository
         } else {
             return ["Please try again!"];
         }
+    }
+
+    public function distanceFeed($data)
+    {
+        if (isset($data['distance']) && $data['distance'] != "") {
+            $distance = $data['distance'];
+        } else {
+            $distance = "";
+        }
+        if (isset($data['time']) && $data['time'] != "") {
+            $time = $data['time'];
+        } else {
+            $time = "";
+        }
+        if (isset($data['jobid']) && $data['jobid'] != "") {
+            $jobid = $data['jobid'];
+        }
+
+        if (isset($data['session_time']) && $data['session_time'] != "") {
+            $session = $data['session_time'];
+        } else {
+            $session = "";
+        }
+
+        if ($data['flagged'] == 'true') {
+            if($data['admincomment'] == '') return "Please, add comment";
+            $flagged = 'yes';
+        } else {
+            $flagged = 'no';
+        }
+        
+        if ($data['manually_handled'] == 'true') {
+            $manually_handled = 'yes';
+        } else {
+            $manually_handled = 'no';
+        }
+
+        if ($data['by_admin'] == 'true') {
+            $by_admin = 'yes';
+        } else {
+            $by_admin = 'no';
+        }
+
+        if (isset($data['admincomment']) && $data['admincomment'] != "") {
+            $admincomment = $data['admincomment'];
+        } else {
+            $admincomment = "";
+        }
+        if ($time || $distance) {
+
+            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
+        }
+
+        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
+
+            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
+
+        }
+
+        return isset($affectedRows1) ? "Record updated!" : "Please try again";
     }
 
     /**
